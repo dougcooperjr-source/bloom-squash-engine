@@ -35,6 +35,25 @@ const UPWARDS_NAME_PREFIX: &str = "Upwards";
 const GAIN_SMOOTHING_MAX_RADIUS_LN: f32 = std::f32::consts::LN_2;
 const PINK_NOISE_SLOPE_OFFSET_DB_PER_OCT: f32 = 3.0;
 
+// Bloom-inspired perceptual contour used for both Squash threshold weighting and knee softness.
+// Oeksound documents the relationship (higher threshold + harder knee in less-sensitive regions,
+// lower threshold + softer knee in more-sensitive regions), but not the proprietary numeric curve.
+// These anchors reuse Polarity-SC-Dark's built-in Equal Loudness threshold preset as the starting
+// perceptual model so the threshold and knee weighting remain internally consistent.
+const BLOOM_EQUAL_LOUDNESS_POINTS: [(f32, f32); 7] = [
+    (35.0, 10.0),
+    (65.0, 6.0),
+    (120.0, 1.5),
+    (1_000.0, -1.0),
+    (3_500.0, -3.0),
+    (8_000.0, -1.5),
+    (15_000.0, 3.0),
+];
+const BLOOM_EQUAL_LOUDNESS_MIN_DB: f32 = -3.0;
+const BLOOM_EQUAL_LOUDNESS_MAX_DB: f32 = 10.0;
+const BLOOM_HARD_KNEE_SCALE: f32 = 0.33;
+const BLOOM_SOFT_KNEE_SCALE: f32 = 2.0;
+
 /// The envelopes are initialized to the RMS value of a -24 dB sine wave to make sure extreme upwards
 /// compression doesn't cause pops when switching between window sizes and when deactivating and
 /// reactivating the plugin.
@@ -83,6 +102,9 @@ pub struct CompressorBank {
     /// that equation. The formula is taken from the Digital Dynamic Range Compressor Design paper
     /// by Dimitrios Giannoulis et. al.
     downwards_knee_parabola_scale: Vec<f32>,
+    /// Per-bin knee width after perceptual weighting. Less-sensitive frequency regions use a
+    /// narrower/harder knee, while more-sensitive regions use a wider/softer knee.
+    downwards_knee_widths_db: Vec<f32>,
     /// `b` in the equation from `downwards_knee_parabola_scale`.
     downwards_knee_parabola_intercept: Vec<f32>,
 
@@ -92,6 +114,8 @@ pub struct CompressorBank {
     upwards_ratios: Vec<f32>,
     /// `downwards_knee_parabola_scale`, but for the upwards compressors.
     upwards_knee_parabola_scale: Vec<f32>,
+    /// Per-bin perceptually weighted knee widths for the upwards compressors.
+    upwards_knee_widths_db: Vec<f32>,
     /// `downwards_knee_parabola_intercept`, but for the upwards compressors.
     upwards_knee_parabola_intercept: Vec<f32>,
 
@@ -227,14 +251,19 @@ impl ThresholdCurvePointParams {
             Arc::new(move |_| set_update_thresholds(0.0))
         };
 
+        let default_point = bloom_equal_loudness_default_point(index);
+
         Self {
-            enabled: BoolParam::new(format!("Curve Point {} Enabled", index + 1), false)
+            enabled: BoolParam::new(
+                format!("Curve Point {} Enabled", index + 1),
+                default_point.is_some(),
+            )
                 .with_callback(set_update_enabled)
                 .hide()
                 .hide_in_generic_ui(),
             frequency: FloatParam::new(
                 format!("Curve Point {} Frequency", index + 1),
-                1_000.0,
+                default_point.map(|point| point.0).unwrap_or(1_000.0),
                 FloatRange::Skewed {
                     min: THRESHOLD_CURVE_MIN_FREQUENCY_HZ,
                     max: THRESHOLD_CURVE_MAX_FREQUENCY_HZ,
@@ -248,7 +277,7 @@ impl ThresholdCurvePointParams {
             .hide_in_generic_ui(),
             offset_db: FloatParam::new(
                 format!("Curve Point {} Offset", index + 1),
-                0.0,
+                default_point.map(|point| point.1).unwrap_or(0.0),
                 FloatRange::Linear {
                     min: -THRESHOLD_CURVE_POINT_OFFSET_LIMIT_DB,
                     max: THRESHOLD_CURVE_POINT_OFFSET_LIMIT_DB,
@@ -352,7 +381,7 @@ impl ThresholdParams {
             // (octaves/decibels). The global threshold is the intercept.
             curve_slope: FloatParam::new(
                 "Threshold Slope",
-                0.0,
+                PINK_NOISE_SLOPE_OFFSET_DB_PER_OCT,
                 FloatRange::SymmetricalSkewed {
                     min: -36.0,
                     max: 36.0,
@@ -520,7 +549,7 @@ impl CompressorParams {
             .with_step_size(0.1),
             ratio: FloatParam::new(
                 format!("{name_prefix} Ratio"),
-                1.0,
+                2.0,
                 FloatRange::Skewed {
                     min: 1.0,
                     max: 500.0,
@@ -533,14 +562,9 @@ impl CompressorParams {
             .with_string_to_value(formatters::s2v_compression_ratio()),
             high_freq_ratio_rolloff: FloatParam::new(
                 format!("{name_prefix} Hi-Freq Rolloff"),
-                // The upwards bank defaults to a gentle rolloff, while the downwards bank keeps
-                // full-band ratios by default.
-                if name_prefix == UPWARDS_NAME_PREFIX {
-                    0.75
-                } else {
-                    // When used subtly, no rolloff is usually better for downwards compression
-                    0.0
-                },
+                // Bloom's documented Squash weighting is carried by the equal-loudness threshold
+                // and knee contours, so keep ratio weighting spectrally neutral here.
+                0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_callback(set_update_ratios)
@@ -588,11 +612,13 @@ impl CompressorBank {
             downwards_thresholds_db: Vec::with_capacity(complex_buffer_len),
             downwards_ratios: Vec::with_capacity(complex_buffer_len),
             downwards_knee_parabola_scale: Vec::with_capacity(complex_buffer_len),
+            downwards_knee_widths_db: Vec::with_capacity(complex_buffer_len),
             downwards_knee_parabola_intercept: Vec::with_capacity(complex_buffer_len),
 
             upwards_thresholds_db: Vec::with_capacity(complex_buffer_len),
             upwards_ratios: Vec::with_capacity(complex_buffer_len),
             upwards_knee_parabola_scale: Vec::with_capacity(complex_buffer_len),
+            upwards_knee_widths_db: Vec::with_capacity(complex_buffer_len),
             upwards_knee_parabola_intercept: Vec::with_capacity(complex_buffer_len),
 
             envelopes: vec![Vec::with_capacity(complex_buffer_len); num_channels],
@@ -638,6 +664,9 @@ impl CompressorBank {
         self.downwards_knee_parabola_scale.reserve_exact(
             complex_buffer_len.saturating_sub(self.downwards_knee_parabola_scale.len()),
         );
+        self.downwards_knee_widths_db.reserve_exact(
+            complex_buffer_len.saturating_sub(self.downwards_knee_widths_db.len()),
+        );
         self.downwards_knee_parabola_intercept.reserve_exact(
             complex_buffer_len.saturating_sub(self.downwards_knee_parabola_intercept.len()),
         );
@@ -648,6 +677,9 @@ impl CompressorBank {
             .reserve_exact(complex_buffer_len.saturating_sub(self.upwards_ratios.len()));
         self.upwards_knee_parabola_scale.reserve_exact(
             complex_buffer_len.saturating_sub(self.upwards_knee_parabola_scale.len()),
+        );
+        self.upwards_knee_widths_db.reserve_exact(
+            complex_buffer_len.saturating_sub(self.upwards_knee_widths_db.len()),
         );
         self.upwards_knee_parabola_intercept.reserve_exact(
             complex_buffer_len.saturating_sub(self.upwards_knee_parabola_intercept.len()),
@@ -704,6 +736,7 @@ impl CompressorBank {
         self.downwards_ratios.resize(complex_buffer_len, 1.0);
         self.downwards_knee_parabola_scale
             .resize(complex_buffer_len, 1.0);
+        self.downwards_knee_widths_db.resize(complex_buffer_len, 0.0);
         self.downwards_knee_parabola_intercept
             .resize(complex_buffer_len, 1.0);
 
@@ -711,6 +744,7 @@ impl CompressorBank {
         self.upwards_ratios.resize(complex_buffer_len, 1.0);
         self.upwards_knee_parabola_scale
             .resize(complex_buffer_len, 1.0);
+        self.upwards_knee_widths_db.resize(complex_buffer_len, 0.0);
         self.upwards_knee_parabola_intercept
             .resize(complex_buffer_len, 1.0);
 
@@ -1208,16 +1242,18 @@ impl CompressorBank {
         freeze_enabled: bool,
         should_update_analyzer_data: bool,
     ) {
-        let downwards_knee_width_db = params.compressors.downwards.knee_width_db.value();
-        let upwards_knee_width_db = params.compressors.upwards.knee_width_db.value();
+        let squash_amount = params.global.squash_amount.value();
+        let squash_cal_db = params.global.squash_cal_db.value();
 
         assert!(self.downwards_thresholds_db.len() == buffer.len());
         assert!(self.downwards_ratios.len() == buffer.len());
         assert!(self.downwards_knee_parabola_scale.len() == buffer.len());
+        assert!(self.downwards_knee_widths_db.len() == buffer.len());
         assert!(self.downwards_knee_parabola_intercept.len() == buffer.len());
         assert!(self.upwards_thresholds_db.len() == buffer.len());
         assert!(self.upwards_ratios.len() == buffer.len());
         assert!(self.upwards_knee_parabola_scale.len() == buffer.len());
+        assert!(self.upwards_knee_widths_db.len() == buffer.len());
         assert!(self.upwards_knee_parabola_intercept.len() == buffer.len());
         assert!(self.frozen_gain_difference_db[channel_idx].len() == buffer.len());
         assert!(self.raw_gain_difference_db.len() == buffer.len());
@@ -1228,14 +1264,16 @@ impl CompressorBank {
             // We'll apply the transfer curve to the envelope signal, and then scale the complex
             // `bin` by the gain difference
             let envelope_db = util::gain_to_db_fast_epsilon(*envelope);
+            let calibrated_envelope_db = envelope_db + squash_cal_db;
 
             let downwards_threshold_db = &self.downwards_thresholds_db[bin_idx];
             let downwards_ratio = &self.downwards_ratios[bin_idx];
+            let downwards_knee_width_db = self.downwards_knee_widths_db[bin_idx];
             let downwards_knee_parabola_scale = &self.downwards_knee_parabola_scale[bin_idx];
             let downwards_knee_parabola_intercept =
                 &self.downwards_knee_parabola_intercept[bin_idx];
             let downwards_compressed = compress_downwards(
-                envelope_db,
+                calibrated_envelope_db,
                 *downwards_threshold_db,
                 *downwards_ratio,
                 downwards_knee_width_db,
@@ -1247,14 +1285,15 @@ impl CompressorBank {
             // amplifying noise. We also don't want to amplify DC noise and super low frequencies.
             let upwards_threshold_db = &self.upwards_thresholds_db[bin_idx];
             let upwards_ratio = &self.upwards_ratios[bin_idx];
+            let upwards_knee_width_db = self.upwards_knee_widths_db[bin_idx];
             let upwards_knee_parabola_scale = &self.upwards_knee_parabola_scale[bin_idx];
             let upwards_knee_parabola_intercept = &self.upwards_knee_parabola_intercept[bin_idx];
             let upwards_compressed = if bin_idx >= first_non_dc_bin
                 && *upwards_ratio != 1.0
-                && envelope_db > util::MINUS_INFINITY_DB
+                && calibrated_envelope_db > util::MINUS_INFINITY_DB
             {
                 compress_upwards(
-                    envelope_db,
+                    calibrated_envelope_db,
                     *upwards_threshold_db,
                     *upwards_ratio,
                     upwards_knee_width_db,
@@ -1262,13 +1301,14 @@ impl CompressorBank {
                     *upwards_knee_parabola_intercept,
                 )
             } else {
-                envelope_db
+                calibrated_envelope_db
             };
 
-            // If the compressed output is -10 dBFS and the envelope follower was at -6 dBFS, then we
-            // want to apply -4 dB of gain to the bin
-            self.raw_gain_difference_db[bin_idx] =
-                downwards_compressed + upwards_compressed - (envelope_db * 2.0);
+            // At Squash Amount = 0 this is exactly neutral. Raising the amount continuously
+            // increases only the level-dependent component, matching Bloom's documented 7->10
+            // transition concept when this parameter is mapped from the rack's upper Amount range.
+            self.raw_gain_difference_db[bin_idx] = squash_amount
+                * (downwards_compressed + upwards_compressed - (calibrated_envelope_db * 2.0));
         }
 
         self.smooth_gain_differences(
@@ -1300,8 +1340,8 @@ impl CompressorBank {
         freeze_enabled: bool,
         should_update_analyzer_data: bool,
     ) {
-        let downwards_knee_width_db = params.compressors.downwards.knee_width_db.value();
-        let upwards_knee_width_db = params.compressors.upwards.knee_width_db.value();
+        let squash_amount = params.global.squash_amount.value();
+        let squash_cal_db = params.global.squash_cal_db.value();
 
         // For the channel linking
         let num_channels = self.sidechain_spectrum_magnitudes.len() as f32;
@@ -1339,6 +1379,7 @@ impl CompressorBank {
 
         for (bin_idx, envelope) in self.envelopes[channel_idx].iter().enumerate() {
             let envelope_db = util::gain_to_db_fast_epsilon(*envelope);
+            let calibrated_envelope_db = envelope_db + squash_cal_db;
 
             // The idea here is that we scale the compressor thresholds/knee values by the sidechain
             // signal, thus sort of creating a dynamic multiband compressor
@@ -1350,8 +1391,10 @@ impl CompressorBank {
                 + sidechain_scale_db)
                 .max(util::MINUS_INFINITY_DB);
             let downwards_ratio = &self.downwards_ratios[bin_idx];
+            let downwards_knee_width_db = self.downwards_knee_widths_db[bin_idx];
             // Because the thresholds are scaled based on the sidechain input, we also need to
-            // recompute the knee coefficients
+            // recompute the knee coefficients. The width itself remains perceptually weighted by
+            // frequency.
             let (downwards_knee_parabola_scale, downwards_knee_parabola_intercept) =
                 downwards_soft_knee_coefficients(
                     downwards_threshold_db,
@@ -1359,7 +1402,7 @@ impl CompressorBank {
                     *downwards_ratio,
                 );
             let downwards_compressed = compress_downwards(
-                envelope_db,
+                calibrated_envelope_db,
                 downwards_threshold_db,
                 *downwards_ratio,
                 downwards_knee_width_db,
@@ -1370,9 +1413,10 @@ impl CompressorBank {
             let upwards_threshold_db = (self.upwards_thresholds_db[bin_idx] + sidechain_scale_db)
                 .max(util::MINUS_INFINITY_DB);
             let upwards_ratio = &self.upwards_ratios[bin_idx];
+            let upwards_knee_width_db = self.upwards_knee_widths_db[bin_idx];
             let upwards_compressed = if bin_idx >= first_non_dc_bin
                 && *upwards_ratio != 1.0
-                && envelope_db > util::MINUS_INFINITY_DB
+                && calibrated_envelope_db > util::MINUS_INFINITY_DB
             {
                 let (upwards_knee_parabola_scale, upwards_knee_parabola_intercept) =
                     upwards_soft_knee_coefficients(
@@ -1381,7 +1425,7 @@ impl CompressorBank {
                         *upwards_ratio,
                     );
                 compress_upwards(
-                    envelope_db,
+                    calibrated_envelope_db,
                     upwards_threshold_db,
                     *upwards_ratio,
                     upwards_knee_width_db,
@@ -1389,13 +1433,11 @@ impl CompressorBank {
                     upwards_knee_parabola_intercept,
                 )
             } else {
-                envelope_db
+                calibrated_envelope_db
             };
 
-            // If the comprssed output is -10 dBFS and the envelope follower was at -6 dBFS, then we
-            // want to apply -4 dB of gain to the bin
-            self.raw_gain_difference_db[bin_idx] =
-                downwards_compressed + upwards_compressed - (envelope_db * 2.0);
+            self.raw_gain_difference_db[bin_idx] = squash_amount
+                * (downwards_compressed + upwards_compressed - (calibrated_envelope_db * 2.0));
         }
 
         self.smooth_gain_differences(
@@ -1618,24 +1660,27 @@ impl CompressorBank {
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let downwards_knee_width_db = params.compressors.downwards.knee_width_db.value();
-            for ((ratio, threshold_db), (knee_parabola_scale, knee_parambola_intercept)) in self
-                .downwards_ratios
+            let downwards_base_knee_width_db = params.compressors.downwards.knee_width_db.value();
+            for (((ln_freq, ratio), threshold_db), ((knee_width_db, knee_parabola_scale), knee_parambola_intercept)) in self
+                .ln_freqs
                 .iter()
+                .zip(self.downwards_ratios.iter())
                 .zip(self.downwards_thresholds_db.iter())
                 .zip(
-                    self.downwards_knee_parabola_scale
+                    self.downwards_knee_widths_db
                         .iter_mut()
+                        .zip(self.downwards_knee_parabola_scale.iter_mut())
                         .zip(self.downwards_knee_parabola_intercept.iter_mut()),
                 )
             {
+                *knee_width_db = bloom_perceptual_knee_width_db(*ln_freq, downwards_base_knee_width_db);
                 // This is the formula from the Digital Dynamic Range Compressor Design paper by
                 // Dimitrios Giannoulis et. al. These are `a` and `b` from the `x + a * (x + b)^2`
                 // respectively used to compute the soft knee respectively.
                 (*knee_parabola_scale, *knee_parambola_intercept) =
                     downwards_soft_knee_coefficients(
                         *threshold_db,
-                        downwards_knee_width_db,
+                        *knee_width_db,
                         *ratio,
                     );
             }
@@ -1646,23 +1691,80 @@ impl CompressorBank {
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let upwards_knee_width_db = params.compressors.upwards.knee_width_db.value();
-            for ((ratio, threshold_db), (knee_parabola_scale, knee_parambola_intercept)) in self
-                .upwards_ratios
+            let upwards_base_knee_width_db = params.compressors.upwards.knee_width_db.value();
+            for (((ln_freq, ratio), threshold_db), ((knee_width_db, knee_parabola_scale), knee_parambola_intercept)) in self
+                .ln_freqs
                 .iter()
+                .zip(self.upwards_ratios.iter())
                 .zip(self.upwards_thresholds_db.iter())
                 .zip(
-                    self.upwards_knee_parabola_scale
+                    self.upwards_knee_widths_db
                         .iter_mut()
+                        .zip(self.upwards_knee_parabola_scale.iter_mut())
                         .zip(self.upwards_knee_parabola_intercept.iter_mut()),
                 )
             {
+                *knee_width_db = bloom_perceptual_knee_width_db(*ln_freq, upwards_base_knee_width_db);
                 // The upwards version is slightly different
                 (*knee_parabola_scale, *knee_parambola_intercept) =
-                    upwards_soft_knee_coefficients(*threshold_db, upwards_knee_width_db, *ratio);
+                    upwards_soft_knee_coefficients(*threshold_db, *knee_width_db, *ratio);
             }
         }
     }
+}
+
+fn bloom_equal_loudness_default_point(index: usize) -> Option<(f32, f32)> {
+    BLOOM_EQUAL_LOUDNESS_POINTS.get(index).copied()
+}
+
+/// Interpolate the equal-loudness anchor offsets in log-frequency space.
+fn bloom_equal_loudness_offset_db(ln_freq: f32) -> f32 {
+    if !ln_freq.is_finite() || ln_freq <= 0.0 {
+        return BLOOM_EQUAL_LOUDNESS_MAX_DB;
+    }
+
+    let first = BLOOM_EQUAL_LOUDNESS_POINTS[0];
+    let last = BLOOM_EQUAL_LOUDNESS_POINTS[BLOOM_EQUAL_LOUDNESS_POINTS.len() - 1];
+    if ln_freq <= first.0.ln() {
+        return first.1;
+    }
+    if ln_freq >= last.0.ln() {
+        return last.1;
+    }
+
+    for pair in BLOOM_EQUAL_LOUDNESS_POINTS.windows(2) {
+        let (left_hz, left_db) = pair[0];
+        let (right_hz, right_db) = pair[1];
+        let left_ln = left_hz.ln();
+        let right_ln = right_hz.ln();
+        if ln_freq <= right_ln {
+            let t = ((ln_freq - left_ln) / (right_ln - left_ln)).clamp(0.0, 1.0);
+            let smooth_t = t * t * (3.0 - 2.0 * t);
+            return left_db + (right_db - left_db) * smooth_t;
+        }
+    }
+
+    last.1
+}
+
+/// Convert the documented Bloom relationship between auditory sensitivity and knee hardness into
+/// a per-bin knee width. Higher equal-loudness threshold offsets correspond to lower sensitivity
+/// and therefore narrower/harder knees; lower offsets correspond to higher sensitivity and
+/// wider/softer knees. The exact proprietary Oeksound mapping is not public, so this keeps the
+/// architecture faithful while exposing one base knee parameter for later ear-tuning.
+fn bloom_perceptual_knee_width_db(ln_freq: f32, base_knee_width_db: f32) -> f32 {
+    if base_knee_width_db <= f32::EPSILON {
+        return 0.0;
+    }
+
+    let contour_db = bloom_equal_loudness_offset_db(ln_freq);
+    let sensitivity_t = 1.0
+        - ((contour_db - BLOOM_EQUAL_LOUDNESS_MIN_DB)
+            / (BLOOM_EQUAL_LOUDNESS_MAX_DB - BLOOM_EQUAL_LOUDNESS_MIN_DB))
+            .clamp(0.0, 1.0);
+    let knee_scale = BLOOM_HARD_KNEE_SCALE
+        + (BLOOM_SOFT_KNEE_SCALE - BLOOM_HARD_KNEE_SCALE) * sensitivity_t;
+    (base_knee_width_db * knee_scale).clamp(0.0, 36.0)
 }
 
 /// Apply downwards compression to the input with the supplied parameters. All values are in
@@ -1756,6 +1858,21 @@ mod tests {
     use super::*;
     use nih_plug::prelude::{BufferConfig, ProcessMode};
     use triple_buffer::TripleBuffer;
+
+    #[test]
+    fn bloom_perceptual_knee_is_harder_where_hearing_is_less_sensitive() {
+        let low_bass_knee = bloom_perceptual_knee_width_db(35.0f32.ln(), 6.0);
+        let presence_knee = bloom_perceptual_knee_width_db(3_500.0f32.ln(), 6.0);
+        assert!(low_bass_knee < presence_knee);
+    }
+
+    #[test]
+    fn bloom_perceptual_knee_matches_expected_default_extremes() {
+        let hard = bloom_perceptual_knee_width_db(35.0f32.ln(), 6.0);
+        let soft = bloom_perceptual_knee_width_db(3_500.0f32.ln(), 6.0);
+        assert!((hard - 1.98).abs() < 0.01);
+        assert!((soft - 12.0).abs() < 0.01);
+    }
 
     fn test_buffer_config(window_size: usize) -> BufferConfig {
         BufferConfig {

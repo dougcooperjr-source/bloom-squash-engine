@@ -1,10 +1,10 @@
 [package]
 name = "polarity_sc_dark"
-version = "0.5.4"
+version = "0.1.0"
 edition = "2021"
 authors = ["Robbert van der Helm <mail@robbertvanderhelm.nl>", "Robert Polarity Agthe <hey@polarity.productions>"]
 license = "GPL-3.0-or-later"
-homepage = "https://polarity.productions/polarity-sc/"
+homepage = "https://github.com/polarity/plugin.nih.polarity-sc-dark"
 
 [lib]
 crate-type = ["lib", "cdylib"]

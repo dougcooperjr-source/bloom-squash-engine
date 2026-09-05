@@ -49,7 +49,7 @@ const MIN_OVERLAP_ORDER: usize = 2;
 const DEFAULT_OVERLAP_ORDER: usize = 4;
 const MAX_OVERLAP_ORDER: usize = 5;
 
-const VST3_CLASS_ID_BYTES: [u8; 16] = *b"Polarity-SC-Dark";
+const VST3_CLASS_ID_BYTES: [u8; 16] = *b"BloomSquashEng01";
 
 /// This is a port of <https://github.com/robbert-vdh/spectral-compressor/>.
 pub struct SpectralCompressor {
@@ -156,6 +156,15 @@ pub struct GlobalParams {
     /// compression.
     #[id = "release"]
     pub compressor_release_ms: FloatParam,
+    /// Bloom-style Squash intensity. 0% is completely neutral; 100% applies the full
+    /// frequency-dependent upward/downward spectral compression curve.
+    #[id = "squash_amount"]
+    pub squash_amount: FloatParam,
+    /// Bloom-style Squash calibration. Positive values make the detector see a hotter signal,
+    /// while negative values make it see a quieter one. This is applied only to the detector
+    /// domain and does not directly gain the output.
+    #[id = "squash_cal"]
+    pub squash_cal_db: FloatParam,
     /// Freeze the current per-bin gain curve and keep applying it until disabled.
     #[id = "compressor_freeze"]
     pub compressor_freeze: BoolParam,
@@ -289,6 +298,23 @@ impl Default for GlobalParams {
             )
             .with_unit(" ms")
             .with_step_size(0.1),
+            squash_amount: FloatParam::new(
+                "Squash Amount",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_unit("%")
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_value_to_string(formatters::v2s_f32_percentage(1))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
+            squash_cal_db: FloatParam::new(
+                "Squash Cal",
+                0.0,
+                FloatRange::Linear { min: -24.0, max: 24.0 },
+            )
+            .with_unit(" dB")
+            .with_smoother(SmoothingStyle::Linear(20.0))
+            .with_step_size(0.1),
             compressor_freeze: BoolParam::new("Freeze", false),
         }
     }
@@ -310,10 +336,10 @@ impl SpectralCompressorParams {
 }
 
 impl Plugin for SpectralCompressor {
-    const NAME: &'static str = "Polarity-SC-Dark";
-    const VENDOR: &'static str = "Polarity-Music";
+    const NAME: &'static str = "Bloom Squash Engine";
+    const VENDOR: &'static str = "Heavy Projects (Polarity-SC-Dark fork)";
     const URL: &'static str = env!("CARGO_PKG_HOMEPAGE");
-    const EMAIL: &'static str = "hey@polarity.productions";
+    const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
@@ -757,9 +783,9 @@ fn process_stft_sidechain(
 }
 
 impl ClapPlugin for SpectralCompressor {
-    const CLAP_ID: &'static str = "de.polarity-music.polarity-sc-dark";
+    const CLAP_ID: &'static str = "local.heavy-projects.bloom-squash-engine";
     const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("Turn things into pink noise on demand and more.");
+        Some("Bloom-style perceptually weighted spectral upward/downward Squash engine.");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[
