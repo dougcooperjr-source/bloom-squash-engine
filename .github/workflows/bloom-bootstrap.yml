@@ -1,0 +1,50 @@
+name: Materialize Bloom v0.2 Source
+
+on:
+  push:
+    branches:
+      - bloom-v0.2-bootstrap-run
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bootstrap branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reassemble and verify recovered source
+        shell: bash
+        env:
+          EXPECTED_BASE: cc990a190545c515b590b05d5e0f4cdcae175b5b
+          EXPECTED_ZIP_SHA256: f83e7e2429ed270722c460ae72b19f83dc66b3cfca86f87c64da87affcb77480
+        run: |
+          set -euo pipefail
+          cat .bloom-bootstrap/part_* > /tmp/bloom_v02_payload.b64
+          base64 --decode /tmp/bloom_v02_payload.b64 > /tmp/bloom_v02_payload.zip
+          echo "$EXPECTED_ZIP_SHA256  /tmp/bloom_v02_payload.zip" | sha256sum --check --strict
+          unzip -t /tmp/bloom_v02_payload.zip
+
+          current_target="$(git ls-remote origin refs/heads/bloom-v0.2 | cut -f1)"
+          if [[ "$current_target" != "$EXPECTED_BASE" ]]; then
+            echo "Refusing to overwrite bloom-v0.2: expected $EXPECTED_BASE, found $current_target" >&2
+            exit 1
+          fi
+
+          unzip -o /tmp/bloom_v02_payload.zip -d .
+          rm -rf .bloom-bootstrap
+          rm -f .github/workflows/bloom-bootstrap.yml
+
+          python VERIFY_SOURCE.py
+
+          git config user.name "Bloom Build Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          tree_sha="$(git write-tree)"
+          commit_sha="$(printf '%s\n' 'Bloom v0.2 source' | git commit-tree "$tree_sha" -p "$EXPECTED_BASE")"
+          echo "Created clean Bloom v0.2 commit: $commit_sha"
+          git push origin "$commit_sha:refs/heads/bloom-v0.2"
