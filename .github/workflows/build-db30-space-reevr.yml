@@ -21,11 +21,15 @@ jobs:
           git checkout e4d553a72c960ad163a34fab574a81102c52ce4e
           git submodule update --init --recursive
 
-      - name: Patch IR Decay to DB-30 measured law
+      - name: Patch REEV-R for DB-30 SPACE
         shell: python
         run: |
           from pathlib import Path
           import re
+
+          # ------------------------------------------------------------------
+          # 1) DB-30 calibrated decay law measured from Booth 0 / 64 / 127.
+          # ------------------------------------------------------------------
           p = Path('reevr/src/dsp/Impulse.cpp')
           s = p.read_text(encoding='utf-8')
           replacement = r'''void Impulse::applyEnvelope()
@@ -45,13 +49,10 @@ jobs:
                   }
               }
 
-              // DB-30 SPACE Decay calibration, measured from Booth at 0 / 64 / 127.
-              // REEV-R IR Decay parameter convention in the rack is inverted:
-              //   0.0 = DB-30 Decay 127 (full captured tail)
-              //   1.0 = DB-30 Decay 0   (shortest tail)
-              // DB-30 does not time-stretch the response for Decay. It applies an
-              // approximately exponential damping envelope across the entire IR,
-              // plus level compensation as the tail is shortened.
+              // DB-30 SPACE Decay calibration.
+              // Rack convention remains inverted:
+              //   IR Decay 0.0 = DB-30 Decay 127 (full tail)
+              //   IR Decay 1.0 = DB-30 Decay 0   (shortest tail)
               const double p = std::clamp((double)decay, 0.0, 1.0);
               if (p > 0.0) {
                   constexpr double kMax = 141.0894697314793;
@@ -81,7 +82,91 @@ jobs:
           if n != 1:
               raise SystemExit(f'Expected one applyEnvelope function, replaced {n}')
           p.write_text(out, encoding='utf-8')
-          print('Patched', p)
+
+          # ------------------------------------------------------------------
+          # 2) Add one discrete DB30 Type parameter.  The order below is taken
+          #    directly from the DB-30 selector screenshot supplied by the user.
+          #    Booth is index 11 and is the default so old v24 state stays Booth.
+          # ------------------------------------------------------------------
+          p = Path('reevr/src/PluginProcessor.cpp')
+          s = p.read_text(encoding='utf-8')
+          anchor = '    layout.add(std::make_unique<juce::AudioParameterFloat>("drywet", "DryWet Mix", juce::NormalisableRange<float>(0.f, 1.0f), 0.25f));\n'
+          add = anchor + '''    layout.add(std::make_unique<juce::AudioParameterChoice>(
+              "db30type", "DB30 Type",
+              StringArray{ "Spring 2", "Spring 1", "Slap 2", "Slap 1", "Reverse", "Rumble", "Plastic", "Plate", "Laser", "Small Stage", "Large Stage", "Booth", "Small Club", "Large Club", "Small Room", "Medium Room", "Large Room", "Small Hall", "Large Hall", "Gated" },
+              11));
+'''
+          if anchor not in s:
+              raise SystemExit('Could not find drywet parameter anchor')
+          s = s.replace(anchor, add, 1)
+
+          # Inject selector loading near the start of onSlider().  It resolves the
+          # already-installed IR folder in the Ableton User Library and uses
+          # REEV-R's existing loadConvolver/crossfade path, so this remains ONE
+          # plugin instance rather than 20 parallel instances.
+          slider_anchor = '''void REEVRAudioProcessor::onSlider()
+          {
+              onSmoothChange();
+'''
+          selector = '''void REEVRAudioProcessor::onSlider()
+          {
+              onSmoothChange();
+
+              const int db30type = (int)params.getRawParameterValue("db30type")->load();
+              if (db30type != lastDB30Type) {
+                  static const std::array<juce::String, 20> db30Files = {
+                      "DB30 SPACE - Spring 2.wav",
+                      "DB30 SPACE - Spring 1.wav",
+                      "DB30 SPACE - Slap 2.wav",
+                      "DB30 SPACE - Slap 1.wav",
+                      "DB30 SPACE - Reverse.wav",
+                      "DB30 SPACE - Rumble.wav",
+                      "DB30 SPACE - Plastic.wav",
+                      "DB30 SPACE - Plate.wav",
+                      "DB30 SPACE - Laser.wav",
+                      "DB30 SPACE - Small Stage.wav",
+                      "DB30 SPACE - Large Stage.wav",
+                      "DB30 SPACE - Booth.wav",
+                      "DB30 SPACE - Small Club.wav",
+                      "DB30 SPACE - Large Club.wav",
+                      "DB30 SPACE - Small Room.wav",
+                      "DB30 SPACE - Medium Room.wav",
+                      "DB30 SPACE - Large Room.wav",
+                      "DB30 SPACE - Small Hall.wav",
+                      "DB30 SPACE - Large Hall.wav",
+                      "DB30 SPACE - Gated.wav"
+                  };
+
+                  const auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+                  const auto ir = docs.getChildFile("Ableton")
+                                      .getChildFile("User Library")
+                                      .getChildFile("Samples")
+                                      .getChildFile("DB30_SPACE_IRs_REEVR_SAFE")
+                                      .getChildFile(db30Files[(size_t)juce::jlimit(0, 19, db30type)]);
+                  if (ir.existsAsFile()) {
+                      loadImpulse(ir.getFullPathName());
+                      lastDB30Type = db30type;
+                  }
+              }
+'''
+          if slider_anchor not in s:
+              raise SystemExit('Could not find onSlider anchor')
+          s = s.replace(slider_anchor, selector, 1)
+          p.write_text(s, encoding='utf-8')
+
+          # ------------------------------------------------------------------
+          # 3) Per-instance selector state.  Do not use a static shared value.
+          # ------------------------------------------------------------------
+          p = Path('reevr/src/PluginProcessor.h')
+          s = p.read_text(encoding='utf-8')
+          header_anchor = '    bool clearTails = false;\n\n    // Reverb State\n'
+          header_add = '    bool clearTails = false;\n    int lastDB30Type = -1; // single-instance DB-30 SPACE IR selector\n\n    // Reverb State\n'
+          if header_anchor not in s:
+              raise SystemExit('Could not find convolver state anchor')
+          s = s.replace(header_anchor, header_add, 1)
+          p.write_text(s, encoding='utf-8')
+
+          print('Patched DB-30 decay + single-instance 20-Type selector')
 
       - name: Configure VST3 build
         shell: pwsh
@@ -106,11 +191,11 @@ jobs:
           $stage = Join-Path $PWD "stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -Recurse -Force $bundle.FullName (Join-Path $stage "REEV-R.vst3")
-          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.1_Windows.zip" -Force
+          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.2_Windows.zip" -Force
 
       - name: Upload VST3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DB30_SPACE_REEV-R_v0.1_Windows
-          path: DB30_SPACE_REEV-R_v0.1_Windows.zip
+          name: DB30_SPACE_REEV-R_v0.2_Windows
+          path: DB30_SPACE_REEV-R_v0.2_Windows.zip
           if-no-files-found: error
