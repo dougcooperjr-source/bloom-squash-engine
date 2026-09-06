@@ -78,12 +78,14 @@ jobs:
           s = p.read_text(encoding='utf-8')
 
           # APPEND the selector at the end of the parameter layout. This preserves
-          # all parameter indices used by the already-known-loading v24 ADG.
+          # all parameter indices used by the already-known-loading v24/v25 ADGs.
+          # DB-30 order follows the supplied selector menu: natural spaces in the
+          # left column top-to-bottom, then special/FX spaces in the right column.
           layout_anchor = '    return layout;\n}'
           selector_param = '''    layout.add(std::make_unique<juce::AudioParameterChoice>(
               "db30type", "DB30 Type",
-              StringArray{ "Spring 2", "Spring 1", "Slap 2", "Slap 1", "Reverse", "Rumble", "Plastic", "Plate", "Laser", "Small Stage", "Large Stage", "Booth", "Small Club", "Large Club", "Small Room", "Medium Room", "Large Room", "Small Hall", "Large Hall", "Gated" },
-              11));
+              StringArray{ "Booth", "Small Room", "Medium Room", "Large Room", "Small Club", "Large Club", "Small Stage", "Large Stage", "Small Hall", "Large Hall", "Plate", "Plastic", "Gated", "Reverse", "Spring 1", "Spring 2", "Slap 1", "Slap 2", "Laser", "Rumble" },
+              0));
 
               return layout;
           }'''
@@ -104,26 +106,26 @@ jobs:
               const int db30type = (int)params.getRawParameterValue("db30type")->load();
               if (db30type != lastDB30Type) {
                   static const std::array<juce::String, 20> db30Files = {
-                      "DB30 SPACE - Spring 2.wav",
-                      "DB30 SPACE - Spring 1.wav",
-                      "DB30 SPACE - Slap 2.wav",
-                      "DB30 SPACE - Slap 1.wav",
-                      "DB30 SPACE - Reverse.wav",
-                      "DB30 SPACE - Rumble.wav",
-                      "DB30 SPACE - Plastic.wav",
-                      "DB30 SPACE - Plate.wav",
-                      "DB30 SPACE - Laser.wav",
-                      "DB30 SPACE - Small Stage.wav",
-                      "DB30 SPACE - Large Stage.wav",
                       "DB30 SPACE - Booth.wav",
-                      "DB30 SPACE - Small Club.wav",
-                      "DB30 SPACE - Large Club.wav",
                       "DB30 SPACE - Small Room.wav",
                       "DB30 SPACE - Medium Room.wav",
                       "DB30 SPACE - Large Room.wav",
+                      "DB30 SPACE - Small Club.wav",
+                      "DB30 SPACE - Large Club.wav",
+                      "DB30 SPACE - Small Stage.wav",
+                      "DB30 SPACE - Large Stage.wav",
                       "DB30 SPACE - Small Hall.wav",
                       "DB30 SPACE - Large Hall.wav",
-                      "DB30 SPACE - Gated.wav"
+                      "DB30 SPACE - Plate.wav",
+                      "DB30 SPACE - Plastic.wav",
+                      "DB30 SPACE - Gated.wav",
+                      "DB30 SPACE - Reverse.wav",
+                      "DB30 SPACE - Spring 1.wav",
+                      "DB30 SPACE - Spring 2.wav",
+                      "DB30 SPACE - Slap 1.wav",
+                      "DB30 SPACE - Slap 2.wav",
+                      "DB30 SPACE - Laser.wav",
+                      "DB30 SPACE - Rumble.wav"
                   };
 
                   const auto docs = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
@@ -152,7 +154,7 @@ jobs:
           s = s.replace(header_anchor, header_add, 1)
           p.write_text(s, encoding='utf-8')
 
-          print('Patched DB-30 decay + single-instance 20-Type selector')
+          print('Patched DB-30 decay + DB-30-order single-instance 20-Type selector')
 
       - name: Configure VST3 build
         shell: pwsh
@@ -173,14 +175,15 @@ jobs:
         run: |
           $bundle = Get-ChildItem -Path reevr/build -Recurse -Directory -Filter "REEV-R.vst3" | Select-Object -First 1
           if (-not $bundle) { throw "REEV-R.vst3 bundle not found" }
+          Write-Host "Found VST3 at $($bundle.FullName)"
           $stage = Join-Path $PWD "stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -Recurse -Force $bundle.FullName (Join-Path $stage "REEV-R.vst3")
-          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.2_Windows.zip" -Force
+          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.3_Windows.zip" -Force
 
       - name: Upload VST3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DB30_SPACE_REEV-R_v0.2_Windows
-          path: DB30_SPACE_REEV-R_v0.2_Windows.zip
+          name: DB30_SPACE_REEV-R_v0.3_Windows
+          path: DB30_SPACE_REEV-R_v0.3_Windows.zip
           if-no-files-found: error
