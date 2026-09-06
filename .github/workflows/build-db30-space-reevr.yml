@@ -27,7 +27,9 @@ jobs:
           from pathlib import Path
           import re
 
-          # Calibrated DB-30 Booth decay law.
+          # DB-30 decay damping measured from Booth + Gated captures.
+          # The time law is shared; wet-energy makeup is derived from the
+          # currently loaded IR so each Type receives the correct compensation.
           p = Path('reevr/src/dsp/Impulse.cpp')
           s = p.read_text(encoding='utf-8')
           replacement = r'''void Impulse::applyEnvelope()
@@ -48,20 +50,44 @@ jobs:
 
               const double p = std::clamp((double)decay, 0.0, 1.0);
               if (p > 0.0) {
-                  constexpr double kMax = 141.0894697314793;
-                  constexpr double curvePower = 4.5327158856483845;
-                  constexpr double gainA = 0.0237828411570946;
-                  constexpr double gainPower = 0.7894018769127824;
+                  constexpr double kMax = 134.76485436144225;
+                  constexpr double curvePower = 4.586055549845544;
                   const double k = kMax * std::pow(p, curvePower);
-                  const double makeup = std::exp(gainA * std::pow(k, gainPower));
+
+                  double energyBefore = 0.0;
+                  double energyAfter = 0.0;
                   for (int i = 0; i < size; ++i) {
                       const double t = (double)i / srate;
-                      const float envgain = (float)(makeup * std::exp(-k * t));
-                      bufferLL[i] *= envgain;
-                      bufferRR[i] *= envgain;
+                      const double damp = std::exp(-k * t);
+
+                      const double ll = bufferLL[i];
+                      const double rr = bufferRR[i];
+                      energyBefore += ll * ll + rr * rr;
+                      energyAfter += (ll * damp) * (ll * damp) + (rr * damp) * (rr * damp);
+
+                      bufferLL[i] *= (float)damp;
+                      bufferRR[i] *= (float)damp;
+
                       if (isQuad) {
-                          bufferLR[i] *= envgain;
-                          bufferRL[i] *= envgain;
+                          const double lr = bufferLR[i];
+                          const double rl = bufferRL[i];
+                          energyBefore += lr * lr + rl * rl;
+                          energyAfter += (lr * damp) * (lr * damp) + (rl * damp) * (rl * damp);
+                          bufferLR[i] *= (float)damp;
+                          bufferRL[i] *= (float)damp;
+                      }
+                  }
+
+                  const double makeup = energyAfter > 1.0e-30
+                      ? std::sqrt(energyBefore / energyAfter)
+                      : 1.0;
+
+                  for (int i = 0; i < size; ++i) {
+                      bufferLL[i] *= (float)makeup;
+                      bufferRR[i] *= (float)makeup;
+                      if (isQuad) {
+                          bufferLR[i] *= (float)makeup;
+                          bufferRL[i] *= (float)makeup;
                       }
                   }
               }
@@ -78,7 +104,7 @@ jobs:
           s = p.read_text(encoding='utf-8')
 
           # APPEND the selector at the end of the parameter layout. This preserves
-          # all parameter indices used by the already-known-loading v24/v25 ADGs.
+          # all parameter indices used by the already-known-loading ADGs.
           # DB-30 order follows the supplied selector menu: natural spaces in the
           # left column top-to-bottom, then special/FX spaces in the right column.
           layout_anchor = '    return layout;\n}'
@@ -154,7 +180,7 @@ jobs:
           s = s.replace(header_anchor, header_add, 1)
           p.write_text(s, encoding='utf-8')
 
-          print('Patched DB-30 decay + DB-30-order single-instance 20-Type selector')
+          print('Patched DB-30 decay with per-IR energy makeup + DB-30-order selector')
 
       - name: Configure VST3 build
         shell: pwsh
@@ -179,11 +205,11 @@ jobs:
           $stage = Join-Path $PWD "stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -Recurse -Force $bundle.FullName (Join-Path $stage "REEV-R.vst3")
-          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.3_Windows.zip" -Force
+          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.4_Windows.zip" -Force
 
       - name: Upload VST3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DB30_SPACE_REEV-R_v0.3_Windows
-          path: DB30_SPACE_REEV-R_v0.3_Windows.zip
+          name: DB30_SPACE_REEV-R_v0.4_Windows
+          path: DB30_SPACE_REEV-R_v0.4_Windows.zip
           if-no-files-found: error
