@@ -1,0 +1,58 @@
+name: Build DB30 SPACE Proof
+
+on:
+  push:
+    branches:
+      - db30-space-decay-v0.1
+    paths:
+      - "space_proof/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bundler.toml"
+      - ".github/workflows/build-db30-space-proof.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout host repo
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: db30-space-proof-windows-${{ hashFiles('Cargo.lock', 'space_proof/Cargo.toml') }}
+
+      - name: Build VST3 bundle
+        shell: bash
+        run: |
+          rm -rf target/bundled
+          cargo xtask bundle -p db30_space_proof --release
+
+      - name: Stage proof plugin
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem -Path target/bundled -Recurse -Directory -Filter "DB30 SPACE Proof.vst3" | Select-Object -First 1
+          if (-not $bundle) { throw "DB30 SPACE Proof.vst3 bundle not found" }
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item -Recurse -Force $bundle.FullName "stage/DB30 SPACE Proof.vst3"
+          Compress-Archive -Path "stage/DB30 SPACE Proof.vst3" -DestinationPath "DB30_SPACE_Proof_v0.1_Windows.zip" -Force
+
+      - name: Upload VST3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DB30_SPACE_Proof_v0.1_Windows
+          path: DB30_SPACE_Proof_v0.1_Windows.zip
+          if-no-files-found: error
