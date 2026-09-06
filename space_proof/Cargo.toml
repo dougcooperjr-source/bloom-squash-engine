@@ -1,0 +1,13 @@
+[package]
+name = "db30_space_proof"
+version = "0.1.0"
+edition = "2021"
+authors = ["Heavy Projects"]
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+nih_plug = { path = "../framework/nih_plug" }
+realfft = "3.0"
+hound = "3.5"
