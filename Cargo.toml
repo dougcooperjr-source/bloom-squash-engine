@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "plugin",
+  "space_proof",
   "framework/nih_plug",
   "framework/nih_plug_derive",
   "framework/nih_plug_vizia",
