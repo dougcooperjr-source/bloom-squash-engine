@@ -1,8 +1,7 @@
-# Bundler metadata for the single plugin shipped by this repository.
-# This file's syntax is as follows:
-#
-# [package_name]
-# name = "Human Readable Plugin Name"  # defaults to <package_name>
+# Bundler metadata for plugins built from this repository.
 
 [polarity_sc_dark]
 name = "Polarity-SC-Dark"
+
+[db30_space_proof]
+name = "DB30 SPACE Proof"
