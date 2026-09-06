@@ -27,9 +27,6 @@ jobs:
           from pathlib import Path
           import re
 
-          # ------------------------------------------------------------------
-          # 1) DB-30 calibrated decay law measured from Booth 0 / 64 / 127.
-          # ------------------------------------------------------------------
           p = Path('reevr/src/dsp/Impulse.cpp')
           s = p.read_text(encoding='utf-8')
           replacement = r'''void Impulse::applyEnvelope()
@@ -37,7 +34,6 @@ jobs:
               auto size = (int)bufferLL.size();
               if (!size) return;
 
-              // Preserve REEV-R's original IR attack behavior.
               int attackSize = int(attack * size);
               for (int i = 0; i < attackSize; ++i) {
                   float envgain = static_cast<float>(i) / static_cast<float>(attackSize);
@@ -49,20 +45,14 @@ jobs:
                   }
               }
 
-              // DB-30 SPACE Decay calibration.
-              // Rack convention remains inverted:
-              //   IR Decay 0.0 = DB-30 Decay 127 (full tail)
-              //   IR Decay 1.0 = DB-30 Decay 0   (shortest tail)
               const double p = std::clamp((double)decay, 0.0, 1.0);
               if (p > 0.0) {
                   constexpr double kMax = 141.0894697314793;
                   constexpr double curvePower = 4.5327158856483845;
                   constexpr double gainA = 0.0237828411570946;
                   constexpr double gainPower = 0.7894018769127824;
-
                   const double k = kMax * std::pow(p, curvePower);
                   const double makeup = std::exp(gainA * std::pow(k, gainPower));
-
                   for (int i = 0; i < size; ++i) {
                       const double t = (double)i / srate;
                       const float envgain = (float)(makeup * std::exp(-k * t));
@@ -83,11 +73,6 @@ jobs:
               raise SystemExit(f'Expected one applyEnvelope function, replaced {n}')
           p.write_text(out, encoding='utf-8')
 
-          # ------------------------------------------------------------------
-          # 2) Add one discrete DB30 Type parameter.  The order below is taken
-          #    directly from the DB-30 selector screenshot supplied by the user.
-          #    Booth is index 11 and is the default so old v24 state stays Booth.
-          # ------------------------------------------------------------------
           p = Path('reevr/src/PluginProcessor.cpp')
           s = p.read_text(encoding='utf-8')
           anchor = '    layout.add(std::make_unique<juce::AudioParameterFloat>("drywet", "DryWet Mix", juce::NormalisableRange<float>(0.f, 1.0f), 0.25f));\n'
@@ -95,19 +80,15 @@ jobs:
               "db30type", "DB30 Type",
               StringArray{ "Spring 2", "Spring 1", "Slap 2", "Slap 1", "Reverse", "Rumble", "Plastic", "Plate", "Laser", "Small Stage", "Large Stage", "Booth", "Small Club", "Large Club", "Small Room", "Medium Room", "Large Room", "Small Hall", "Large Hall", "Gated" },
               11));
-'''
+          '''
           if anchor not in s:
               raise SystemExit('Could not find drywet parameter anchor')
           s = s.replace(anchor, add, 1)
 
-          # Inject selector loading near the start of onSlider().  It resolves the
-          # already-installed IR folder in the Ableton User Library and uses
-          # REEV-R's existing loadConvolver/crossfade path, so this remains ONE
-          # plugin instance rather than 20 parallel instances.
           slider_anchor = '''void REEVRAudioProcessor::onSlider()
           {
               onSmoothChange();
-'''
+          '''
           selector = '''void REEVRAudioProcessor::onSlider()
           {
               onSmoothChange();
@@ -148,15 +129,12 @@ jobs:
                       lastDB30Type = db30type;
                   }
               }
-'''
+          '''
           if slider_anchor not in s:
               raise SystemExit('Could not find onSlider anchor')
           s = s.replace(slider_anchor, selector, 1)
           p.write_text(s, encoding='utf-8')
 
-          # ------------------------------------------------------------------
-          # 3) Per-instance selector state.  Do not use a static shared value.
-          # ------------------------------------------------------------------
           p = Path('reevr/src/PluginProcessor.h')
           s = p.read_text(encoding='utf-8')
           header_anchor = '    bool clearTails = false;\n\n    // Reverb State\n'
@@ -187,7 +165,6 @@ jobs:
         run: |
           $bundle = Get-ChildItem -Path reevr/build -Recurse -Directory -Filter "REEV-R.vst3" | Select-Object -First 1
           if (-not $bundle) { throw "REEV-R.vst3 bundle not found" }
-          Write-Host "Found VST3 at $($bundle.FullName)"
           $stage = Join-Path $PWD "stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -Recurse -Force $bundle.FullName (Join-Path $stage "REEV-R.vst3")
