@@ -1,0 +1,116 @@
+name: Build DB30 Space REEV-R
+
+on:
+  push:
+    branches:
+      - db30-space-decay-v0.1
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout host repo
+        uses: actions/checkout@v4
+
+      - name: Clone pinned REEV-R 1.4.0
+        shell: pwsh
+        run: |
+          git clone --recursive https://github.com/tiagolr/reevr.git reevr
+          Set-Location reevr
+          git checkout e4d553a72c960ad163a34fab574a81102c52ce4e
+          git submodule update --init --recursive
+
+      - name: Patch IR Decay to DB-30 measured law
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          p = Path('reevr/src/dsp/Impulse.cpp')
+          s = p.read_text(encoding='utf-8')
+          replacement = r'''void Impulse::applyEnvelope()
+          {
+              auto size = (int)bufferLL.size();
+              if (!size) return;
+
+              // Preserve REEV-R's original IR attack behavior.
+              int attackSize = int(attack * size);
+              for (int i = 0; i < attackSize; ++i) {
+                  float envgain = static_cast<float>(i) / static_cast<float>(attackSize);
+                  bufferLL[i] *= envgain;
+                  bufferRR[i] *= envgain;
+                  if (isQuad) {
+                      bufferLR[i] *= envgain;
+                      bufferRL[i] *= envgain;
+                  }
+              }
+
+              // DB-30 SPACE Decay calibration, measured from Booth at 0 / 64 / 127.
+              // REEV-R IR Decay parameter convention in the rack is inverted:
+              //   0.0 = DB-30 Decay 127 (full captured tail)
+              //   1.0 = DB-30 Decay 0   (shortest tail)
+              // DB-30 does not time-stretch the response for Decay. It applies an
+              // approximately exponential damping envelope across the entire IR,
+              // plus level compensation as the tail is shortened.
+              const double p = std::clamp((double)decay, 0.0, 1.0);
+              if (p > 0.0) {
+                  constexpr double kMax = 141.0894697314793;
+                  constexpr double curvePower = 4.5327158856483845;
+                  constexpr double gainA = 0.0237828411570946;
+                  constexpr double gainPower = 0.7894018769127824;
+
+                  const double k = kMax * std::pow(p, curvePower);
+                  const double makeup = std::exp(gainA * std::pow(k, gainPower));
+
+                  for (int i = 0; i < size; ++i) {
+                      const double t = (double)i / srate;
+                      const float envgain = (float)(makeup * std::exp(-k * t));
+                      bufferLL[i] *= envgain;
+                      bufferRR[i] *= envgain;
+                      if (isQuad) {
+                          bufferLR[i] *= envgain;
+                          bufferRL[i] *= envgain;
+                      }
+                  }
+              }
+          }
+
+          int Impulse::getTailStart'''
+          pattern = r'void Impulse::applyEnvelope\(\)\s*\{.*?\n\}\n\nint Impulse::getTailStart'
+          out, n = re.subn(pattern, replacement, s, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'Expected one applyEnvelope function, replaced {n}')
+          p.write_text(out, encoding='utf-8')
+          print('Patched', p)
+
+      - name: Configure VST3 build
+        shell: pwsh
+        run: |
+          cmake -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_STANDALONE=OFF `
+            -DBUILD_LV2=OFF `
+            -DBUILD_VST3=ON `
+            -S reevr -B reevr/build
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          cmake --build reevr/build --config Release --parallel 2
+
+      - name: Package VST3
+        shell: pwsh
+        run: |
+          $bundle = Get-ChildItem -Path reevr/build -Recurse -Directory -Filter "REEV-R.vst3" | Select-Object -First 1
+          if (-not $bundle) { throw "REEV-R.vst3 bundle not found" }
+          Write-Host "Found VST3 at $($bundle.FullName)"
+          $stage = Join-Path $PWD "stage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse -Force $bundle.FullName (Join-Path $stage "REEV-R.vst3")
+          Compress-Archive -Path (Join-Path $stage "REEV-R.vst3") -DestinationPath "DB30_SPACE_REEV-R_v0.1_Windows.zip" -Force
+
+      - name: Upload VST3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DB30_SPACE_REEV-R_v0.1_Windows
+          path: DB30_SPACE_REEV-R_v0.1_Windows.zip
+          if-no-files-found: error
