@@ -27,6 +27,7 @@ jobs:
           from pathlib import Path
           import re
 
+          # Calibrated DB-30 Booth decay law.
           p = Path('reevr/src/dsp/Impulse.cpp')
           s = p.read_text(encoding='utf-8')
           replacement = r'''void Impulse::applyEnvelope()
@@ -75,16 +76,23 @@ jobs:
 
           p = Path('reevr/src/PluginProcessor.cpp')
           s = p.read_text(encoding='utf-8')
-          anchor = '    layout.add(std::make_unique<juce::AudioParameterFloat>("drywet", "DryWet Mix", juce::NormalisableRange<float>(0.f, 1.0f), 0.25f));\n'
-          add = anchor + '''    layout.add(std::make_unique<juce::AudioParameterChoice>(
+
+          # APPEND the selector at the end of the parameter layout. This preserves
+          # all parameter indices used by the already-known-loading v24 ADG.
+          layout_anchor = '    return layout;\n}'
+          selector_param = '''    layout.add(std::make_unique<juce::AudioParameterChoice>(
               "db30type", "DB30 Type",
               StringArray{ "Spring 2", "Spring 1", "Slap 2", "Slap 1", "Reverse", "Rumble", "Plastic", "Plate", "Laser", "Small Stage", "Large Stage", "Booth", "Small Club", "Large Club", "Small Room", "Medium Room", "Large Room", "Small Hall", "Large Hall", "Gated" },
               11));
-          '''
-          if anchor not in s:
-              raise SystemExit('Could not find drywet parameter anchor')
-          s = s.replace(anchor, add, 1)
 
+              return layout;
+          }'''
+          if layout_anchor not in s:
+              raise SystemExit('Could not find end of parameter layout')
+          s = s.replace(layout_anchor, selector_param, 1)
+
+          # One parameter selects one of the 20 exact captured DB-30 IRs through
+          # REEV-R's existing asynchronous load/crossfade convolver path.
           slider_anchor = '''void REEVRAudioProcessor::onSlider()
           {
               onSmoothChange();
@@ -138,7 +146,7 @@ jobs:
           p = Path('reevr/src/PluginProcessor.h')
           s = p.read_text(encoding='utf-8')
           header_anchor = '    bool clearTails = false;\n\n    // Reverb State\n'
-          header_add = '    bool clearTails = false;\n    int lastDB30Type = -1; // single-instance DB-30 SPACE IR selector\n\n    // Reverb State\n'
+          header_add = '    bool clearTails = false;\n    int lastDB30Type = -1; // per-instance DB-30 SPACE selector state\n\n    // Reverb State\n'
           if header_anchor not in s:
               raise SystemExit('Could not find convolver state anchor')
           s = s.replace(header_anchor, header_add, 1)
