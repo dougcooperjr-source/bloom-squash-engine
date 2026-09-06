@@ -86,7 +86,7 @@ jobs:
       - name: Configure VST3 build
         shell: pwsh
         run: |
-          cmake -G "Visual Studio 17 2022" -A x64 `
+          cmake -G "Visual Studio 18 2026" -A x64 `
             -DBUILD_STANDALONE=OFF `
             -DBUILD_LV2=OFF `
             -DBUILD_VST3=ON `
