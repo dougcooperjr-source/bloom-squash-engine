@@ -17,6 +17,50 @@ use resources::{load_type_sets, BOOTH_INDEX};
 const VST3_CLASS_ID_BYTES: [u8; 16] = *b"DB30SPACEPROOF01";
 const MAX_PREDELAY_MS: i32 = 300;
 
+#[derive(Enum, PartialEq, Eq, Clone, Copy)]
+pub enum SpaceType {
+    Booth,
+    #[name = "Small Room"]
+    SmallRoom,
+    #[name = "Medium Room"]
+    MediumRoom,
+    #[name = "Large Room"]
+    LargeRoom,
+    #[name = "Small Club"]
+    SmallClub,
+    #[name = "Large Club"]
+    LargeClub,
+    #[name = "Small Stage"]
+    SmallStage,
+    #[name = "Large Stage"]
+    LargeStage,
+    #[name = "Small Hall"]
+    SmallHall,
+    #[name = "Large Hall"]
+    LargeHall,
+    Plate,
+    Plastic,
+    Gated,
+    Reverse,
+    #[name = "Spring 1"]
+    Spring1,
+    #[name = "Spring 2"]
+    Spring2,
+    #[name = "Slap 1"]
+    Slap1,
+    #[name = "Slap 2"]
+    Slap2,
+    Laser,
+    Rumble,
+}
+
+impl SpaceType {
+    #[inline]
+    fn index(self) -> i32 {
+        self.to_index() as i32
+    }
+}
+
 pub struct Db30SpaceProof {
     params: Arc<Db30SpaceProofParams>,
     convolver: Option<PartitionedConvolver>,
@@ -32,7 +76,7 @@ pub struct Db30SpaceProof {
 #[derive(Params)]
 pub struct Db30SpaceProofParams {
     #[id = "type"]
-    pub type_index: IntParam,
+    pub type_index: EnumParam<SpaceType>,
     #[id = "decay"]
     pub decay: IntParam,
     #[id = "stretch"]
@@ -44,11 +88,7 @@ pub struct Db30SpaceProofParams {
 impl Default for Db30SpaceProofParams {
     fn default() -> Self {
         Self {
-            type_index: IntParam::new(
-                "Type (DB30 order 0-19)",
-                0,
-                IntRange::Linear { min: 0, max: 19 },
-            ),
+            type_index: EnumParam::new("Type", SpaceType::Booth),
             decay: IntParam::new(
                 "Decay",
                 127,
@@ -158,7 +198,7 @@ impl Plugin for Db30SpaceProof {
 
                 context.set_latency_samples(PARTITION_SIZE as u32);
                 nih_log!(
-                    "DB30 SPACE Proof v0.3 loaded 20 Types with Audio7 decay calibration"
+                    "DB30 SPACE Proof v0.3.1 loaded named 20-Type selector with Audio7 decay calibration"
                 );
             }
             Err(err) => {
@@ -187,7 +227,7 @@ impl Plugin for Db30SpaceProof {
     ) -> ProcessStatus {
         self.receive_rebuilt_kernels();
 
-        let requested_type = self.params.type_index.value().clamp(0, 19);
+        let requested_type = self.params.type_index.value().index();
         let requested_stretch = self.params.stretch.value().clamp(50, 200);
         self.request_rebuild_if_needed(requested_type, requested_stretch);
 
