@@ -48,11 +48,11 @@ jobs:
           if (-not $bundle) { throw "DB30 SPACE Proof.vst3 bundle not found" }
           New-Item -ItemType Directory -Force -Path stage | Out-Null
           Copy-Item -Recurse -Force $bundle.FullName "stage/DB30 SPACE Proof.vst3"
-          Compress-Archive -Path "stage/DB30 SPACE Proof.vst3" -DestinationPath "DB30_SPACE_Proof_v0.2_Windows.zip" -Force
+          Compress-Archive -Path "stage/DB30 SPACE Proof.vst3" -DestinationPath "DB30_SPACE_Proof_v0.3_Windows.zip" -Force
 
       - name: Upload VST3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DB30_SPACE_Proof_v0.2_Windows
-          path: DB30_SPACE_Proof_v0.2_Windows.zip
+          name: DB30_SPACE_Proof_v0.3_Windows
+          path: DB30_SPACE_Proof_v0.3_Windows.zip
           if-no-files-found: error
